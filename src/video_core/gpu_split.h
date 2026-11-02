@@ -115,7 +115,7 @@ private:
     static constexpr size_t RingWords = size_t{1} << 20; // 8 MiB
     static constexpr size_t RingMask = RingWords - 1;
     static constexpr u32 MaxMultiWords = 8192;
-    static constexpr size_t PublishEvery = 256;
+    static constexpr size_t PublishEvery = 512;
 
     template <typename Func>
     static void CallThunk(const u64* payload) {
