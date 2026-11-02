@@ -265,23 +265,37 @@ size_t GpuSplit::Execute(const u64* entry) {
     case Kind::Engine:
         back_engine = reinterpret_cast<Tegra::Engines::EngineInterface*>(entry[1]);
         return 2;
-    case Kind::Method: {
+        case Kind::Method: {
         const u32 method = static_cast<u32>((head >> 8) & 0xffff);
         const u32 argument = static_cast<u32>(head >> 32);
         auto* const engine = back_engine;
         if ((head & Direct) != 0) {
-            Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
-            engine->ConsumeSink(*system);
-            engine->CallMethod(*system, method, argument, true);
+            const auto call = [&] {
+                engine->ConsumeSink(*system);
+                engine->CallMethod(*system, method, argument, true);
+            };
+            if (Nx2Profile::Enabled()) {
+                Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+                call();
+            } else {
+                call();
+            }
         } else if (!engine->execution_mask[method]) {
             engine->method_sink.emplace_back(method, argument);
         } else {
-            Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
-            engine->ConsumeSink(*system);
-            if ((head & HasSegment) != 0) {
-                engine->current_dma_segment = entry[1];
+            const auto call = [&] {
+                engine->ConsumeSink(*system);
+                if ((head & HasSegment) != 0) {
+                    engine->current_dma_segment = entry[1];
+                }
+                engine->CallMethod(*system, method, argument, (head & IsLast) != 0);
+            };
+            if (Nx2Profile::Enabled()) {
+                Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+                call();
+            } else {
+                call();
             }
-            engine->CallMethod(*system, method, argument, (head & IsLast) != 0);
         }
         return (head & HasSegment) != 0 ? 2 : 1;
     }
@@ -290,36 +304,22 @@ size_t GpuSplit::Execute(const u64* entry) {
         const u32 amount = static_cast<u32>(head >> 32);
         const size_t data = (head & HasSegment) != 0 ? 3 : 2;
         auto* const engine = back_engine;
-        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
-        engine->ConsumeSink(*system);
-        if ((head & HasSegment) != 0) {
-            engine->current_dma_segment = entry[2];
+        const auto call = [&] {
+            engine->ConsumeSink(*system);
+            if ((head & HasSegment) != 0) {
+                engine->current_dma_segment = entry[2];
+            }
+            engine->CallMultiMethod(*system, method, reinterpret_cast<const u32*>(entry + data),
+                                    amount, static_cast<u32>(entry[1]));
+        };
+        if (Nx2Profile::Enabled()) {
+            Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+            call();
+        } else {
+            call();
         }
-        engine->CallMultiMethod(*system, method, reinterpret_cast<const u32*>(entry + data),
-                                amount, static_cast<u32>(entry[1]));
         return data + (amount + 1) / 2;
     }
-    case Kind::Call: {
-        const size_t payload = static_cast<size_t>((head >> 8) & 0xffffff);
-        reinterpret_cast<void (*)(const u64*)>(entry[1])(entry + 2);
-        return 2 + payload;
-    }
-    }
-    return 1;
-}
-
-void GpuSplit::BackLoop(std::stop_token stop_token) {
-    Common::SetCurrentThreadName("GPUBack");
-    Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
-    Common::SetCurrentThreadToPerformanceCores();
-    system->RegisterHostThread();
-#ifdef _WIN32
-    g_back_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);
-#endif
-    u64 read_position = 0;
-    while (!stop_token.stop_requested()) {
-        Nx2Profile::Report("GPU back thread");
-        u64 available = published.load(std::memory_order_acquire);
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
             // The front usually sends more within microseconds: spin briefly before sleeping.
